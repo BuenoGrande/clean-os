@@ -80,10 +80,20 @@ public struct Recorder {
                 if let startIndex, shortcuts.contains(startIndex) {
                     SpaceMover.switchToSpace(index: startIndex)
                 }
-                let unreachable = (1...min(spaceCount, 9)).filter { !shortcuts.contains($0) }
-                if !unreachable.isEmpty {
+                let withoutShortcut = (1...min(spaceCount, 9)).filter { !shortcuts.contains($0) }
+                if !withoutShortcut.isEmpty {
                     notes.append(
-                        "Desktop \(unreachable.map(String.init).joined(separator: ", ")) could not be visited because there is no keyboard shortcut for it, so any window there was not recorded."
+                        "Desktop \(withoutShortcut.map(String.init).joined(separator: ", ")) could not be visited because there is no keyboard shortcut for it, so any window there was not recorded."
+                    )
+                }
+                // macOS only offers switching shortcuts for the first nine
+                // desktops, so anything past that cannot be reached at all.
+                // Saying so matters: otherwise a recording quietly covers part
+                // of the machine and the gap only shows up as a restore that
+                // misses half your apps.
+                if spaceCount > 9 {
+                    notes.append(
+                        "Desktop 10 to \(spaceCount) were skipped. macOS only provides switching shortcuts for the first nine desktops, so there is no way to reach the rest, and any window on them was not recorded. Consider moving what matters onto desktops 1 to 9."
                     )
                 }
             }

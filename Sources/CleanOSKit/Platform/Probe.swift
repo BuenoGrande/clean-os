@@ -72,7 +72,7 @@ public enum Probe {
         } + [Line(label: "Profile key", value: displays.key)]))
 
         let groups = SkyLight.displaySpaces()
-        sections.append(Section(title: "Desktops", lines: groups.isEmpty
+        var desktopLines: [Line] = groups.isEmpty
             ? [Line(label: "Enumeration", value: "returned nothing, so desktops cannot be read on this machine", ok: false)]
             : groups.map { group in
                 let user = group.spaces.filter(\.isUserSpace)
@@ -84,7 +84,21 @@ public enum Probe {
                     ok: !user.isEmpty
                 )
             }
-        ))
+
+        // Everything here addresses desktops through the Mission Control
+        // keystrokes, and macOS only provides those for the first nine. More
+        // than nine desktops is therefore a hard limit rather than a warning,
+        // and it is much better learned now than after a recording quietly
+        // covers two thirds of the machine.
+        let mostDesktops = groups.map { $0.spaces.filter(\.isUserSpace).count }.max() ?? 0
+        if mostDesktops > 9 {
+            desktopLines.append(Line(
+                label: "Reachable",
+                value: "only desktops 1 to 9. You have \(mostDesktops), so \(mostDesktops - 9) of them cannot be recorded or restored at all, because macOS provides no switching shortcut past the ninth. Move what matters onto the first nine.",
+                ok: false
+            ))
+        }
+        sections.append(Section(title: "Desktops", lines: desktopLines))
 
         let windows = Accessibility.isTrusted ? Capturer.capture(displays: displays) : []
         let located = windows.filter { $0.observed.spaceIndex != nil }.count
