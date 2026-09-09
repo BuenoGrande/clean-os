@@ -168,13 +168,15 @@ public enum Probe {
 
     /// Move one window to another desktop and put it back.
     ///
-    /// Uses a window belonging to this tool's own caller where possible and
-    /// otherwise the frontmost ordinary window, and always attempts to return
-    /// it. Apps whose title bar is a tab strip are skipped, because the drag
-    /// would tear out a tab.
+    /// Choosing the subject is most of the work. A window whose app draws its
+    /// own title bar will fail for reasons that have nothing to do with
+    /// whether the technique works, so this looks for an ordinary title bar
+    /// first, and will visit another desktop to find one rather than testing
+    /// whatever happens to be in front of you. It always puts the window back
+    /// and returns you to the desktop you started on.
     static func moveTest(displays: DisplaySet, windows: [Capturer.CapturedWindow]) -> Section {
         guard let group = SkyLight.displaySpaces().first(where: { $0.spaces.filter(\.isUserSpace).count > 1 }),
-              let currentIndex = group.currentIndex
+              let startedOn = group.currentIndex
         else {
             return Section(title: "Moving between desktops", lines: [
                 Line(
@@ -185,59 +187,76 @@ public enum Probe {
             ])
         }
 
-        let userSpaces = group.spaces.filter(\.isUserSpace)
-        guard let target = userSpaces.first(where: { $0.index != currentIndex }) else {
-            return Section(title: "Moving between desktops", lines: [
-                Line(label: "Skipped", value: "Could not find a second desktop to aim at.", ok: nil),
-            ])
-        }
-
+        // Only desktops with a switching shortcut can be reached, so only
+        // windows living on those can be tested or moved.
+        let reachable = 1...9
         let usable = windows.filter { window in
-            window.observed.spaceIndex == currentIndex
+            guard let index = window.observed.spaceIndex else { return false }
+            return reachable.contains(index)
                 && !SpaceMover.tabStripApps.contains(window.observed.bundleID)
                 && !window.observed.isMinimized
                 && Accessibility.isMovable(window.element)
         }
 
-        // An explicit choice beats any heuristic when diagnosing.
         let requested = ProcessInfo.processInfo.environment["CLEANOS_TEST_APP"]
-        if let requested, usable.first(where: { $0.observed.bundleID == requested }) == nil {
-            return Section(title: "Moving between desktops", lines: [
-                Line(
-                    label: "Requested app not usable",
-                    value: "\(requested) has no movable, unminimised window on desktop \(currentIndex). See the window list above for what is available here.",
-                    ok: false
-                ),
-            ])
+        if let requested {
+            if usable.first(where: { $0.observed.bundleID == requested }) == nil {
+                let elsewhere = windows.first { $0.observed.bundleID == requested }
+                let detail = elsewhere.flatMap(\.observed.spaceIndex).map { index in
+                    index > 9
+                        ? "Its window is on desktop \(index), which has no switching shortcut and cannot be reached. Move that window onto desktops 1 to 9 first."
+                        : "Its window is on desktop \(index) but is minimised, tiled, or refuses to be moved."
+                } ?? "It has no readable window at all. Open one and run this again."
+                return Section(title: "Moving between desktops", lines: [
+                    Line(label: "Requested app not usable", value: "\(requested). \(detail)", ok: false),
+                ])
+            }
         }
 
-        // Otherwise prefer an Apple app with an ordinary title bar. Many
-        // third-party apps draw their own top bar with controls across the
-        // middle, so a press there hits a button instead of the window, and
-        // the test then blames the technique for a bad grab point.
+        // Prefer an explicit choice, then an ordinary title bar anywhere
+        // reachable, then whatever is on the desktop in front of you.
         let candidate = requested.flatMap { id in usable.first { $0.observed.bundleID == id } }
+            ?? usable.first { knownStandardTitleBar.contains($0.observed.bundleID) && $0.observed.spaceIndex == startedOn }
             ?? usable.first { knownStandardTitleBar.contains($0.observed.bundleID) }
+            ?? usable.first { $0.observed.spaceIndex == startedOn }
             ?? usable.first
 
-        guard let candidate else {
+        guard let candidate, let home = candidate.observed.spaceIndex else {
             return Section(title: "Moving between desktops", lines: [
                 Line(
                     label: "Skipped",
-                    value: "No suitable window on this desktop. Open something with an ordinary title bar, not a browser or a terminal, and run this again.",
+                    value: "No window with an ordinary title bar on desktops 1 to 9. Open TextEdit or a Finder window on one of them and run this again.",
                     ok: nil
                 ),
             ])
         }
 
+        let userSpaces = group.spaces.filter(\.isUserSpace)
+        guard let target = userSpaces.first(where: { $0.index != home && reachable.contains($0.index) }) else {
+            return Section(title: "Moving between desktops", lines: [
+                Line(label: "Skipped", value: "Could not find a second reachable desktop to aim at.", ok: nil),
+            ])
+        }
+
         var lines: [Line] = [
-            Line(label: "Test window", value: "\(candidate.observed.bundleID) on desktop \(currentIndex)"),
+            Line(
+                label: "Test window",
+                value: "\(candidate.observed.bundleID) on desktop \(home), aiming at desktop \(target.index)"
+            ),
         ]
         if !knownStandardTitleBar.contains(candidate.observed.bundleID) {
             lines.append(Line(
                 label: "Caution",
-                value: "this app may draw its own title bar, so a failure below might be the grab point rather than the technique. Open TextEdit or a Finder window on this desktop and run the test again to be sure.",
+                value: "this app may draw its own title bar, so a failure below might be the grab point rather than the technique. Open TextEdit on a reachable desktop and run again to be sure.",
                 ok: nil
             ))
+        }
+
+        // Go to the window before touching it: the gesture only works on the
+        // desktop being displayed.
+        if home != startedOn {
+            SpaceMover.switchToSpace(index: home)
+            lines.append(Line(label: "Visited desktop \(home)", value: "to reach the test window", ok: nil))
         }
 
         let outcome = SpaceMover.move(
@@ -269,42 +288,40 @@ public enum Probe {
         case .refusedNoTitleBar:
             lines.append(Line(label: "Move", value: "refused, no usable title bar", ok: false))
         case .failed(let reason):
-            lines.append(Line(
-                label: "Move",
-                value: "failed: \(reason). Desktop support will not work on this machine as built.",
-                ok: false
-            ))
+            lines.append(Line(label: "Move", value: "failed: \(reason)", ok: false))
         }
 
-        // Put it back, whatever happened.
-        let back = SpaceMover.move(
-            element: candidate.element,
-            windowID: candidate.observed.windowID,
-            bundleID: candidate.observed.bundleID,
-            toSpaceIndex: currentIndex,
-            targetSpaceID: group.spaces.first { $0.index == currentIndex }?.id
-        )
-        let returned: Bool
-        switch back {
-        case .movedDirectly, .movedByDrag, .alreadyThere: returned = true
-        default: returned = false
-        }
-        // Only worth reporting when the window actually went somewhere. Saying
-        // a window "returned" when it never left reads as a success next to a
-        // failure, which is the opposite of clear.
+        // Put the window back, whatever happened.
         switch outcome {
         case .movedDirectly, .movedByDrag:
+            let back = SpaceMover.move(
+                element: candidate.element,
+                windowID: candidate.observed.windowID,
+                bundleID: candidate.observed.bundleID,
+                toSpaceIndex: home,
+                targetSpaceID: userSpaces.first { $0.index == home }?.id
+            )
+            let returned: Bool
+            switch back {
+            case .movedDirectly, .movedByDrag, .alreadyThere: returned = true
+            default: returned = false
+            }
             lines.append(Line(
-                label: "Returned to desktop \(currentIndex)",
+                label: "Returned to desktop \(home)",
                 value: returned ? "yes" : "no, please move it back by hand",
                 ok: returned
             ))
         default:
             lines.append(Line(
                 label: "Clean up",
-                value: "nothing to undo, the window never left desktop \(currentIndex)",
+                value: "nothing to undo, the window never left desktop \(home)",
                 ok: nil
             ))
+        }
+
+        // And put you back where you were.
+        if let nowOn = SkyLight.displaySpaces().first?.currentIndex, nowOn != startedOn {
+            SpaceMover.switchToSpace(index: startedOn)
         }
 
         return Section(title: "Moving between desktops", lines: lines)
