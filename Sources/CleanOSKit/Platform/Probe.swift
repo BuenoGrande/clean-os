@@ -35,6 +35,19 @@ public enum Probe {
         }
     }
 
+    /// Apple apps whose title bar is a plain title bar, used to pick a fair
+    /// subject for the move test.
+    static let knownStandardTitleBar: Set<String> = [
+        "com.apple.finder",
+        "com.apple.TextEdit",
+        "com.apple.Notes",
+        "com.apple.Preview",
+        "com.apple.ActivityMonitor",
+        "com.apple.systempreferences",
+        "com.apple.iCal",
+        "com.apple.AddressBook",
+    ]
+
     public static func run(includeMoveTest: Bool) -> [Section] {
         var sections: [Section] = []
 
@@ -151,12 +164,18 @@ public enum Probe {
             ])
         }
 
-        let candidate = windows.first { window in
+        let usable = windows.filter { window in
             window.observed.spaceIndex == currentIndex
                 && !SpaceMover.tabStripApps.contains(window.observed.bundleID)
                 && !window.observed.isMinimized
                 && Accessibility.isMovable(window.element)
         }
+        // Prefer an Apple app with an ordinary title bar. Many third-party
+        // apps draw their own top bar with controls across the middle, so a
+        // press there hits a button instead of the window, and the test then
+        // blames the technique for what is really a bad grab point.
+        let candidate = usable.first { knownStandardTitleBar.contains($0.observed.bundleID) }
+            ?? usable.first
 
         guard let candidate else {
             return Section(title: "Moving between desktops", lines: [
@@ -171,6 +190,13 @@ public enum Probe {
         var lines: [Line] = [
             Line(label: "Test window", value: "\(candidate.observed.bundleID) on desktop \(currentIndex)"),
         ]
+        if !knownStandardTitleBar.contains(candidate.observed.bundleID) {
+            lines.append(Line(
+                label: "Caution",
+                value: "this app may draw its own title bar, so a failure below might be the grab point rather than the technique. Open TextEdit or a Finder window on this desktop and run the test again to be sure.",
+                ok: nil
+            ))
+        }
 
         let outcome = SpaceMover.move(
             element: candidate.element,
@@ -221,11 +247,23 @@ public enum Probe {
         case .movedDirectly, .movedByDrag, .alreadyThere: returned = true
         default: returned = false
         }
-        lines.append(Line(
-            label: "Returned to desktop \(currentIndex)",
-            value: returned ? "yes" : "no, please move it back by hand",
-            ok: returned
-        ))
+        // Only worth reporting when the window actually went somewhere. Saying
+        // a window "returned" when it never left reads as a success next to a
+        // failure, which is the opposite of clear.
+        switch outcome {
+        case .movedDirectly, .movedByDrag:
+            lines.append(Line(
+                label: "Returned to desktop \(currentIndex)",
+                value: returned ? "yes" : "no, please move it back by hand",
+                ok: returned
+            ))
+        default:
+            lines.append(Line(
+                label: "Clean up",
+                value: "nothing to undo, the window never left desktop \(currentIndex)",
+                ok: nil
+            ))
+        }
 
         return Section(title: "Moving between desktops", lines: lines)
     }

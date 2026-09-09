@@ -89,6 +89,16 @@ public enum Accessibility {
         return (movedFirst || movedAgain) && resized
     }
 
+    /// Bring a window to the front within its own app.
+    ///
+    /// Needed before simulating a drag on it: macOS treats a press on a
+    /// background window as a click that activates it, not as the start of a
+    /// drag, so without this the first gesture is always consumed.
+    @discardableResult
+    public static func raise(_ element: AXUIElement) -> Bool {
+        AXUIElementPerformAction(element, kAXRaiseAction as CFString) == .success
+    }
+
     public static func isSettable(_ element: AXUIElement, _ attribute: String) -> Bool {
         var settable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(element, attribute as CFString, &settable) == .success
