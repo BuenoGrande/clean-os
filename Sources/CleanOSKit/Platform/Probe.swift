@@ -35,6 +35,23 @@ public enum Probe {
         }
     }
 
+    /// Why a window is or is not a fair subject for the move test.
+    static func verdict(for window: Capturer.CapturedWindow) -> String {
+        let observed = window.observed
+        let place = observed.spaceIndex.map { "desktop \($0)" } ?? "desktop unknown"
+        if observed.isMinimized { return "\(place), minimised" }
+        if SpaceMover.tabStripApps.contains(observed.bundleID) {
+            return "\(place), skipped because its title bar is a tab strip"
+        }
+        if !Accessibility.isMovable(window.element) {
+            return "\(place), cannot be moved or resized, probably full screen or tiled"
+        }
+        if knownStandardTitleBar.contains(observed.bundleID) {
+            return "\(place), usable and has an ordinary title bar"
+        }
+        return "\(place), usable but may draw its own title bar"
+    }
+
     /// Apple apps whose title bar is a plain title bar, used to pick a fair
     /// subject for the move test.
     static let knownStandardTitleBar: Set<String> = [
@@ -115,14 +132,25 @@ public enum Probe {
 
         let windows = Accessibility.isTrusted ? Capturer.capture(displays: displays) : []
         let located = windows.filter { $0.observed.spaceIndex != nil }.count
-        sections.append(Section(title: "Windows", lines: [
+        var windowLines: [Line] = [
             Line(label: "Readable windows", value: "\(windows.count)", ok: !windows.isEmpty),
             Line(
                 label: "Located on a desktop",
                 value: "\(located) of \(windows.count)",
                 ok: windows.isEmpty ? nil : located > 0
             ),
-        ]))
+        ]
+        // Naming each window and why it is or is not a usable test subject.
+        // Without this, a move test that keeps choosing the wrong window looks
+        // like the technique failing rather than the choice being wrong.
+        for window in windows.sorted(by: { $0.observed.bundleID < $1.observed.bundleID }) {
+            windowLines.append(Line(
+                label: window.observed.bundleID,
+                value: verdict(for: window),
+                ok: nil
+            ))
+        }
+        sections.append(Section(title: "Windows", lines: windowLines))
 
         if includeMoveTest {
             sections.append(moveTest(displays: displays, windows: windows))
@@ -170,11 +198,25 @@ public enum Probe {
                 && !window.observed.isMinimized
                 && Accessibility.isMovable(window.element)
         }
-        // Prefer an Apple app with an ordinary title bar. Many third-party
-        // apps draw their own top bar with controls across the middle, so a
-        // press there hits a button instead of the window, and the test then
-        // blames the technique for what is really a bad grab point.
-        let candidate = usable.first { knownStandardTitleBar.contains($0.observed.bundleID) }
+
+        // An explicit choice beats any heuristic when diagnosing.
+        let requested = ProcessInfo.processInfo.environment["CLEANOS_TEST_APP"]
+        if let requested, usable.first(where: { $0.observed.bundleID == requested }) == nil {
+            return Section(title: "Moving between desktops", lines: [
+                Line(
+                    label: "Requested app not usable",
+                    value: "\(requested) has no movable, unminimised window on desktop \(currentIndex). See the window list above for what is available here.",
+                    ok: false
+                ),
+            ])
+        }
+
+        // Otherwise prefer an Apple app with an ordinary title bar. Many
+        // third-party apps draw their own top bar with controls across the
+        // middle, so a press there hits a button instead of the window, and
+        // the test then blames the technique for a bad grab point.
+        let candidate = requested.flatMap { id in usable.first { $0.observed.bundleID == id } }
+            ?? usable.first { knownStandardTitleBar.contains($0.observed.bundleID) }
             ?? usable.first
 
         guard let candidate else {
