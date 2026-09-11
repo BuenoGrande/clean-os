@@ -259,6 +259,46 @@ public enum Probe {
             lines.append(Line(label: "Visited desktop \(home)", value: "to reach the test window", ok: nil))
         }
 
+        // Before asking anything about desktops, find out whether a synthetic
+        // press is accepted as a window drag at all. "The window did not
+        // change desktop" has two causes that look identical from outside, and
+        // they need opposite responses: either the drag never engaged, or it
+        // engaged and the handoff to Mission Control did not happen. Plain
+        // sideways movement separates them in one measurement.
+        var dragEngaged = true
+        if let probe = SpaceMover.dragProbe(
+            element: candidate.element,
+            bundleID: candidate.observed.bundleID
+        ) {
+            dragEngaged = probe.engaged
+            lines.append(Line(
+                label: "Plain drag, no desktop involved",
+                value: probe.engaged
+                    ? "the window moved \(Int(probe.movedBy)) points, so macOS does accept our press as a window drag"
+                    : "the window did not move at all, so macOS does not accept our synthetic press as a window drag. That is the root cause, and no grab point or timing will change it.",
+                ok: probe.engaged
+            ))
+            Accessibility.setFrame(probe.before, on: candidate.element)
+        } else {
+            lines.append(Line(
+                label: "Plain drag, no desktop involved",
+                value: "could not read the window frame, so this could not be measured",
+                ok: false
+            ))
+        }
+
+        guard dragEngaged else {
+            lines.append(Line(
+                label: "Desktop move",
+                value: "not attempted, because the drag it depends on does not work. Per-app desktop assignment is the way forward.",
+                ok: nil
+            ))
+            if let nowOn = SkyLight.displaySpaces().first?.currentIndex, nowOn != startedOn {
+                SpaceMover.switchToSpace(index: startedOn)
+            }
+            return Section(title: "Moving between desktops", lines: lines)
+        }
+
         let outcome = SpaceMover.move(
             element: candidate.element,
             windowID: candidate.observed.windowID,

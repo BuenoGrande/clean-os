@@ -168,16 +168,7 @@ public enum SpaceMover {
 
         // Bring the window forward. A background window does not respond to a
         // title bar drag the way the frontmost one does.
-        let owner = NSRunningApplication
-            .runningApplications(withBundleIdentifier: bundleID)
-            .first
-        if #available(macOS 14.0, *) {
-            owner?.activate()
-        } else {
-            owner?.activate(options: [])
-        }
-        Accessibility.raise(element)
-        Thread.sleep(forTimeInterval: 0.2)
+        bringToFront(element: element, bundleID: bundleID)
 
         // Put the real pointer on the title bar. macOS tracks the physical
         // cursor as well as the coordinates carried by each event, and a drag
@@ -227,6 +218,80 @@ public enum SpaceMover {
         if let cursorBefore {
             CGWarpMouseCursorPosition(cursorBefore)
         }
+    }
+
+    // MARK: Is a synthetic drag a drag at all
+
+    public struct DragProbe: Sendable {
+        public var before: CGRect
+        public var after: CGRect
+        public var requested: CGFloat
+
+        public var movedBy: CGFloat { after.minX - before.minX }
+        /// Half the requested distance is the threshold: apps snap and clamp,
+        /// so an exact match is not expected, but nothing at all is decisive.
+        public var engaged: Bool { abs(movedBy) > requested / 2 }
+    }
+
+    /// Press the title bar and drag sideways, with no desktop switch involved,
+    /// to find out whether macOS accepts our synthetic events as a window drag
+    /// in the first place.
+    ///
+    /// This exists because "the window did not change desktop" has two very
+    /// different causes that look identical: either the drag never engaged, or
+    /// it engaged and the handoff to Mission Control did not happen. Measuring
+    /// plain sideways movement separates them, and needs no desktop, no
+    /// keystroke and no particular app to be open.
+    public static func dragProbe(
+        element: AXUIElement,
+        bundleID: String,
+        distance: CGFloat = 60
+    ) -> DragProbe? {
+        guard let before = Accessibility.frame(of: element) else { return nil }
+        let grab = CGPoint(
+            x: before.minX + before.width * grabFraction,
+            y: before.minY + titleBarInset
+        )
+        let cursorBefore = CGEvent(source: nil)?.location
+
+        bringToFront(element: element, bundleID: bundleID)
+        CGWarpMouseCursorPosition(grab)
+        postMouse(.mouseMoved, at: grab)
+        Thread.sleep(forTimeInterval: 0.06)
+        postMouse(.leftMouseDown, at: grab)
+        Thread.sleep(forTimeInterval: 0.14)
+
+        var point = grab
+        let step = distance / 12
+        for _ in 0..<12 {
+            point.x += step
+            postMouse(.leftMouseDragged, at: point)
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        Thread.sleep(forTimeInterval: 0.15)
+        postMouse(.leftMouseUp, at: point)
+        Thread.sleep(forTimeInterval: 0.3)
+
+        if let cursorBefore {
+            CGWarpMouseCursorPosition(cursorBefore)
+        }
+        guard let after = Accessibility.frame(of: element) else { return nil }
+        return DragProbe(before: before, after: after, requested: distance)
+    }
+
+    /// Bring a window forward before pressing on it. A press on a background
+    /// window is spent activating it rather than starting a drag.
+    static func bringToFront(element: AXUIElement, bundleID: String) {
+        let owner = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleID)
+            .first
+        if #available(macOS 14.0, *) {
+            owner?.activate()
+        } else {
+            owner?.activate(options: [])
+        }
+        Accessibility.raise(element)
+        Thread.sleep(forTimeInterval: 0.2)
     }
 
     // MARK: Event plumbing
