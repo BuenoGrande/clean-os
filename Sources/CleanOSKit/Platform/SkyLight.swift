@@ -2,6 +2,7 @@ import ApplicationServices
 import CoreGraphics
 import Darwin
 import Foundation
+import ObjectiveC
 
 /// Bindings to the private window-server functions that expose desktops.
 ///
@@ -62,6 +63,92 @@ public enum SkyLight {
     private static let getWindow: GetWindowFn? = symbol("_AXUIElementGetWindow", in: anyImage)
         .map { unsafeBitCast($0, to: GetWindowFn.self) }
 
+    // MARK: The bridged move, which is the newer path
+    //
+    // The function above stopped working on another app's window in macOS 14.5,
+    // when the window server began checking whether the caller owns the window.
+    // Apple's own window management kept working, through a different shape:
+    // instead of calling a function that mutates a window, you describe the
+    // move as an operation object and ask the window server to perform it. That
+    // path is not subject to the ownership check.
+    //
+    // Everything about it is discovered at runtime, because none of it is
+    // declared anywhere we can see, and because the function has internal
+    // linkage, which normally makes a symbol unreachable. Three spellings are
+    // tried and the probe reports which, if any, resolved.
+
+    private static let bridgedOperationClass: AnyClass? =
+        NSClassFromString("SLSBridgedMoveWindowsToManagedSpaceOperation")
+
+    private static let objcMsgSend: UnsafeMutableRawPointer? = dlsym(anyImage, "objc_msgSend")
+
+    private static let bridgedSymbolCandidates = [
+        "__ZL54SLSPerformAsynchronousBridgedWindowManagementOperationP47SLSAsynchronousBridgedWindowManagementOperation",
+        "_ZL54SLSPerformAsynchronousBridgedWindowManagementOperationP47SLSAsynchronousBridgedWindowManagementOperation",
+        "SLSPerformAsynchronousBridgedWindowManagementOperation",
+    ]
+
+    /// Which spelling of the perform function resolved, if any. Reported by the
+    /// probe, because it is the first thing to check when this stops working.
+    public static let bridgedSymbolSpelling: String? = bridgedSymbolCandidates.first {
+        symbol($0, in: skyLightHandle) != nil || symbol($0, in: anyImage) != nil
+    }
+
+    private typealias PerformBridgedFn = @convention(c) (UnsafeMutableRawPointer) -> Int64
+
+    private static let performBridged: PerformBridgedFn? = {
+        guard let name = bridgedSymbolSpelling else { return nil }
+        let pointer = symbol(name, in: skyLightHandle) ?? symbol(name, in: anyImage)
+        return pointer.map { unsafeBitCast($0, to: PerformBridgedFn.self) }
+    }()
+
+    private static let bridgedInitSelector = sel_getUid("initWithWindows:spaceID:")
+
+    public static var isBridgedMoveAvailable: Bool {
+        guard let cls = bridgedOperationClass, performBridged != nil, objcMsgSend != nil
+        else { return false }
+        return class_getInstanceMethod(cls, bridgedInitSelector) != nil
+    }
+
+    /// Ask the window server to move windows to a desktop, the way its own
+    /// window management does.
+    ///
+    /// Returns whether the operation was submitted, which is not the same as
+    /// done: the operation is asynchronous, so the caller must confirm by
+    /// re-reading where the window actually ended up.
+    ///
+    /// The operation is built through the Objective-C runtime with raw pointers
+    /// and is deliberately never released. Swift cannot type a dynamic call
+    /// mixing an object and a sixty-four bit integer, and handing an object it
+    /// knows nothing about to automatic memory management risks freeing it
+    /// while the window server is still working on it. One small leak per move
+    /// is the better trade.
+    @discardableResult
+    public static func attemptBridgedMove(windowIDs: [UInt32], toSpace spaceID: UInt64) -> Bool {
+        guard isBridgedMoveAvailable,
+              let cls = bridgedOperationClass,
+              let perform = performBridged,
+              let msgSend = objcMsgSend
+        else { return false }
+
+        let allocate = unsafeBitCast(
+            msgSend,
+            to: (@convention(c) (AnyClass, Selector) -> UnsafeMutableRawPointer?).self
+        )
+        guard let allocated = allocate(cls, sel_getUid("alloc")) else { return false }
+
+        let initialise = unsafeBitCast(
+            msgSend,
+            to: (@convention(c) (UnsafeMutableRawPointer, Selector, NSArray, UInt64) -> UnsafeMutableRawPointer?).self
+        )
+        let windows = windowIDs.map { NSNumber(value: $0) } as NSArray
+        guard let operation = initialise(allocated, bridgedInitSelector, windows, spaceID)
+        else { return false }
+
+        _ = perform(operation)
+        return true
+    }
+
     /// Which of the private pieces are present on this machine. The probe
     /// command prints this, and it is the first thing to look at when desktop
     /// support stops working after a macOS update.
@@ -73,6 +160,9 @@ public enum SkyLight {
             "SLSCopySpacesForWindows": copySpacesForWindows != nil,
             "SLSMoveWindowsToManagedSpace": moveWindowsToManagedSpace != nil,
             "_AXUIElementGetWindow": getWindow != nil,
+            "SLSBridgedMoveWindowsToManagedSpaceOperation": bridgedOperationClass != nil,
+            "SLSPerformAsynchronousBridgedWindowManagementOperation": performBridged != nil,
+            "bridged move usable": isBridgedMoveAvailable,
         ]
     }
 

@@ -23,6 +23,9 @@ public enum SpaceMover {
 
     public enum Outcome: Equatable, Sendable {
         case alreadyThere
+        /// Moved by asking the window server to perform the move as an
+        /// operation, which is how its own window management does it.
+        case movedByBridgedOperation
         case movedDirectly
         case movedByDrag
         /// Refused on purpose. The title bar of this app is a tab strip, and
@@ -89,6 +92,19 @@ public enum SpaceMover {
         return true
     }
 
+    /// Wait for a window to actually arrive on a desktop.
+    ///
+    /// Needed because the move that matters is asynchronous and reports only
+    /// that it was submitted. Reading back is the only way to know.
+    static func waitForWindow(_ windowID: UInt32, toReach spaceID: UInt64, within seconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        repeat {
+            if SkyLight.spaceIDs(forWindow: windowID).contains(spaceID) { return true }
+            Thread.sleep(forTimeInterval: 0.06)
+        } while Date() < deadline
+        return false
+    }
+
     /// Which desktop each monitor is currently showing.
     ///
     /// Used to tell "the keystroke was ignored" apart from "the desktop
@@ -114,13 +130,21 @@ public enum SpaceMover {
             return .alreadyThere
         }
 
-        // Ask the window server directly first. It is instant when it works,
-        // and it reports success whether or not it did anything, which is why
-        // the result is checked rather than believed.
+        // Ask the window server to perform the move as an operation. This is
+        // the path its own window management uses and the only one not subject
+        // to the ownership check, so it is tried before anything else. It is
+        // asynchronous, so the result is polled rather than believed.
         if let targetSpaceID {
+            if SkyLight.attemptBridgedMove(windowIDs: [windowID], toSpace: targetSpaceID),
+               waitForWindow(windowID, toReach: targetSpaceID, within: 1.5) {
+                return .movedByBridgedOperation
+            }
+
+            // The older call, which has been a silent no-op for another app's
+            // window since macOS 14.5 but costs nothing to try and is instant
+            // where it still works.
             SkyLight.attemptMove(windowIDs: [windowID], toSpace: targetSpaceID)
-            Thread.sleep(forTimeInterval: 0.12)
-            if SkyLight.spaceIDs(forWindow: windowID).contains(targetSpaceID) {
+            if waitForWindow(windowID, toReach: targetSpaceID, within: 0.3) {
                 return .movedDirectly
             }
         }

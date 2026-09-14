@@ -166,7 +166,7 @@ public struct Restorer {
                 switch outcome {
                 case .alreadyThere:
                     break
-                case .movedDirectly, .movedByDrag:
+                case .movedByBridgedOperation, .movedDirectly, .movedByDrag:
                     report.applied.append("moved \(bundleID) to desktop \(index)")
                 case .refusedTabStrip(let id):
                     report.problems.append(

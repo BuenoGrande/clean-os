@@ -85,12 +85,17 @@ public enum Probe {
             }
         ))
 
-        sections.append(Section(
-            title: "Private window server symbols",
-            lines: SkyLight.availability
-                .sorted { $0.key < $1.key }
-                .map { Line(label: $0.key, value: $0.value ? "found" : "missing", ok: $0.value) }
+        var symbolLines = SkyLight.availability
+            .sorted { $0.key < $1.key }
+            .map { Line(label: $0.key, value: $0.value ? "found" : "missing", ok: $0.value) }
+        // Which spelling resolved is the first thing to check when the bridged
+        // move stops working after a macOS update.
+        symbolLines.append(Line(
+            label: "bridged symbol spelling",
+            value: SkyLight.bridgedSymbolSpelling ?? "none of the three spellings resolved",
+            ok: SkyLight.bridgedSymbolSpelling != nil
         ))
+        sections.append(Section(title: "Private window server symbols", lines: symbolLines))
 
         let displays = Displays.current()
         sections.append(Section(title: "Monitors", lines: displays.displays.map { display in
@@ -259,46 +264,6 @@ public enum Probe {
             lines.append(Line(label: "Visited desktop \(home)", value: "to reach the test window", ok: nil))
         }
 
-        // Before asking anything about desktops, find out whether a synthetic
-        // press is accepted as a window drag at all. "The window did not
-        // change desktop" has two causes that look identical from outside, and
-        // they need opposite responses: either the drag never engaged, or it
-        // engaged and the handoff to Mission Control did not happen. Plain
-        // sideways movement separates them in one measurement.
-        var dragEngaged = true
-        if let probe = SpaceMover.dragProbe(
-            element: candidate.element,
-            bundleID: candidate.observed.bundleID
-        ) {
-            dragEngaged = probe.engaged
-            lines.append(Line(
-                label: "Plain drag, no desktop involved",
-                value: probe.engaged
-                    ? "the window moved \(Int(probe.movedBy)) points, so macOS does accept our press as a window drag"
-                    : "the window did not move at all, so macOS does not accept our synthetic press as a window drag. That is the root cause, and no grab point or timing will change it.",
-                ok: probe.engaged
-            ))
-            Accessibility.setFrame(probe.before, on: candidate.element)
-        } else {
-            lines.append(Line(
-                label: "Plain drag, no desktop involved",
-                value: "could not read the window frame, so this could not be measured",
-                ok: false
-            ))
-        }
-
-        guard dragEngaged else {
-            lines.append(Line(
-                label: "Desktop move",
-                value: "not attempted, because the drag it depends on does not work. Per-app desktop assignment is the way forward.",
-                ok: nil
-            ))
-            if let nowOn = SkyLight.displaySpaces().first?.currentIndex, nowOn != startedOn {
-                SpaceMover.switchToSpace(index: startedOn)
-            }
-            return Section(title: "Moving between desktops", lines: lines)
-        }
-
         let outcome = SpaceMover.move(
             element: candidate.element,
             windowID: candidate.observed.windowID,
@@ -308,6 +273,12 @@ public enum Probe {
         )
 
         switch outcome {
+        case .movedByBridgedOperation:
+            lines.append(Line(
+                label: "Bridged window server operation",
+                value: "worked. Desktops are solved: moves are per window, instant, and use no simulated gestures.",
+                ok: true
+            ))
         case .movedDirectly:
             lines.append(Line(
                 label: "Direct window server move",
@@ -331,9 +302,29 @@ public enum Probe {
             lines.append(Line(label: "Move", value: "failed: \(reason)", ok: false))
         }
 
+        // Only when something failed is it worth knowing whether a synthetic
+        // press is accepted as a window drag at all. Measuring plain sideways
+        // movement separates "the drag never engaged" from "it engaged and the
+        // handoff did not happen", which need opposite responses.
+        if case .failed = outcome {
+            if let probe = SpaceMover.dragProbe(
+                element: candidate.element,
+                bundleID: candidate.observed.bundleID
+            ) {
+                lines.append(Line(
+                    label: "Plain drag, no desktop involved",
+                    value: probe.engaged
+                        ? "the window moved \(Int(probe.movedBy)) points, so the drag itself works and only the handoff to the desktop switch is missing"
+                        : "the window did not move at all, so macOS does not accept our synthetic press as a window drag. No grab point or timing will change that.",
+                    ok: probe.engaged
+                ))
+                Accessibility.setFrame(probe.before, on: candidate.element)
+            }
+        }
+
         // Put the window back, whatever happened.
         switch outcome {
-        case .movedDirectly, .movedByDrag:
+        case .movedByBridgedOperation, .movedDirectly, .movedByDrag:
             let back = SpaceMover.move(
                 element: candidate.element,
                 windowID: candidate.observed.windowID,
@@ -343,7 +334,7 @@ public enum Probe {
             )
             let returned: Bool
             switch back {
-            case .movedDirectly, .movedByDrag, .alreadyThere: returned = true
+            case .movedByBridgedOperation, .movedDirectly, .movedByDrag, .alreadyThere: returned = true
             default: returned = false
             }
             lines.append(Line(
